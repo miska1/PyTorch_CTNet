@@ -52,3 +52,4 @@ $RECYCLE.BIN/
 *.lnk
 outputs
 CTNet_Steganalysis.zip
+CTNet_Steganalysis/CTNet_Steganalysis/data

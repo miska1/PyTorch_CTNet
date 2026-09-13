@@ -32,7 +32,8 @@ from torch.utils.data import DataLoader
 from ctnet import CLASS_NAMES, IMAGE_SIZE, CTNet
 from datasets import (COVER_DIR, STEGO_DIR, InferenceImageDataset, collect_labeled_images,
                       inference_collate, is_labeled_dir, list_images)
-from utils import DEFAULT_DATA_DIR, get_device, load_checkpoint, set_logger
+from utils import (DEFAULT_DATA_DIR, compute_metrics, get_device, load_checkpoint, log_metrics,
+                   plot_roc, save_metrics, save_roc_points, set_logger)
 
 try:
     from tqdm import tqdm
@@ -125,47 +126,6 @@ def predict(model, device, paths, batch_size=32, tile_mode="tile", aggregate="me
 
 
 # --------------------------------------------------------------------------- #
-#  Metrics                                                                     #
-# --------------------------------------------------------------------------- #
-def roc_auc(labels, scores):
-    """Area under ROC via the Mann-Whitney U statistic (ties get average rank)."""
-    labels, scores = np.asarray(labels), np.asarray(scores, dtype=float)
-    n_pos, n_neg = int((labels == 1).sum()), int((labels == 0).sum())
-    if n_pos == 0 or n_neg == 0:
-        return None
-    order = np.argsort(scores, kind="mergesort")
-    _, inv, counts = np.unique(scores[order], return_inverse=True, return_counts=True)
-    avg_rank = np.cumsum(counts) - (counts - 1) / 2.0
-    ranks = np.empty(len(scores))
-    ranks[order] = avg_rank[inv]
-    return float((ranks[labels == 1].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
-
-
-def compute_metrics(labels, preds, scores):
-    labels, preds = np.asarray(labels), np.asarray(preds)
-    tn = int(((labels == 0) & (preds == 0)).sum())
-    fp = int(((labels == 0) & (preds == 1)).sum())
-    fn = int(((labels == 1) & (preds == 0)).sum())
-    tp = int(((labels == 1) & (preds == 1)).sum())
-    n_cover, n_stego = tn + fp, tp + fn
-    p_fa = fp / n_cover if n_cover else None          # false alarm (cover called stego)
-    p_md = fn / n_stego if n_stego else None          # missed detection
-    return {
-        "images": len(labels), "tn": tn, "fp": fp, "fn": fn, "tp": tp,
-        "accuracy": (tn + tp) / max(len(labels), 1),
-        "cover_accuracy": None if p_fa is None else 1 - p_fa,
-        "stego_accuracy": None if p_md is None else 1 - p_md,
-        "P_FA": p_fa, "P_MD": p_md,
-        "P_E": None if p_fa is None or p_md is None else 0.5 * (p_fa + p_md),
-        "AUC": roc_auc(labels, scores),
-    }
-
-
-def fmt(v):
-    return "n/a" if v is None else f"{v:.4f}"
-
-
-# --------------------------------------------------------------------------- #
 #  Main                                                                        #
 # --------------------------------------------------------------------------- #
 def main(args):
@@ -216,20 +176,27 @@ def main(args):
                  f"(threshold {args.threshold}, {len(failed)} skipped)")
 
     if labeled:
-        m = compute_metrics([r["label"] for r in labeled], [r["pred"] for r in labeled],
-                            [r["p_stego"] for r in labeled])
-        logging.info("-" * 60)
-        logging.info(f"Labelled images : {m['images']}")
-        logging.info(f"Accuracy        : {fmt(m['accuracy'])}")
-        logging.info(f"Cover accuracy  : {fmt(m['cover_accuracy'])}   (P_FA = {fmt(m['P_FA'])})")
-        logging.info(f"Stego accuracy  : {fmt(m['stego_accuracy'])}   (P_MD = {fmt(m['P_MD'])})")
-        logging.info(f"P_E             : {fmt(m['P_E'])}   (0.5 * (P_FA + P_MD))")
-        logging.info(f"ROC AUC         : {fmt(m['AUC'])}")
-        logging.info("Confusion matrix (rows = true, cols = predicted):")
-        logging.info(f"            cover   stego")
-        logging.info(f"   cover {m['tn']:>7} {m['fp']:>7}")
-        logging.info(f"   stego {m['fn']:>7} {m['tp']:>7}")
-        logging.info("-" * 60)
+        labels = [r["label"] for r in labeled]
+        scores = [r["p_stego"] for r in labeled]
+        m = compute_metrics(labels, scores, args.threshold)
+        logging.info("")
+        log_metrics(m, f"Labelled images - {Path(args.weights).name}")
+
+        if args.metrics:
+            save_metrics(args.metrics, m, checkpoint=str(args.weights),
+                         input=[str(i) for i in args.input],
+                         tile_mode=args.tile_mode, aggregate=args.aggregate)
+            logging.info(f"Metrics written to {args.metrics}")
+        if args.roc:
+            png = plot_roc(labels, scores, args.roc,
+                           title=f"ROC - CTNet ({Path(args.weights).stem})", auc=m["AUC"])
+            save_roc_points(Path(args.roc).with_suffix(".csv"), labels, scores)
+            if png:
+                logging.info(f"ROC curve written to {png} "
+                             f"(points: {Path(args.roc).with_suffix('.csv')})")
+    elif args.metrics or args.roc:
+        logging.warning("No labelled images (need cover/ and stego/ folders) - "
+                        "metrics file and ROC curve skipped.")
 
     if args.output:
         out = Path(args.output)
@@ -260,7 +227,12 @@ def parse_args(argv=None):
     p.add_argument("--batch-size", type=int, default=32, help="tiles per forward pass")
     p.add_argument("--workers", type=int, default=2)
     p.add_argument("--device", default="auto", help="auto | cpu | cuda | cuda:1 | mps")
-    p.add_argument("--output", "-o", default=None, help="optional CSV file with all predictions")
+    p.add_argument("--output", "-o", default=None, help="CSV file with the prediction for every image")
+    p.add_argument("--metrics", "-m", default=None,
+                   help="JSON file with the full metric report (labelled input only)")
+    p.add_argument("--roc", default=None,
+                   help="save the ROC curve here, e.g. roc.png (labelled input only); "
+                        "the raw points are written next to it as .csv")
     p.add_argument("--verbose", "-v", action="store_true", help="print every image, also in labelled mode")
     return p.parse_args(argv)
 

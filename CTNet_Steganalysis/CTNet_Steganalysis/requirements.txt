@@ -11,3 +11,4 @@ numpy>=1.23
 opencv-python>=4.5     # image I/O + Gabor kernels (opencv-python-headless also works)
 einops>=0.6            # tensor rearrange in the Transformer
 tqdm>=4.60             # progress bar in test.py
+matplotlib>=3.5        # ROC curve plot (without it only the .csv points are written)

@@ -36,8 +36,8 @@ CTNet_Steganalysis/
 │   ├── datasets.py         # image reading, cover/stego pairing, augmentation, tiling
 │   ├── train.py            # training / validation / final test
 │   ├── test.py             # testing on labelled folders or arbitrary images
-│   └── utils.py            # logging, checkpoints, LR schedule, helpers
-├── outputs/                # created by train.py (checkpoints, logs, metrics)
+│   └── utils.py            # logging, checkpoints, LR schedule, metrics, ROC plot
+├── outputs/                # created by train.py (checkpoints, logs, metrics, ROC curve)
 ├── requirements.txt
 └── README.md
 ```
@@ -128,6 +128,8 @@ Main options (`python src/train.py -h` lists all):
 | `--eval-every` | 1 | validate every N epochs |
 | `--no-bn-adjust` | off | skip the BN-statistics refresh pass before evaluation (≈2× faster epochs) |
 | `--no-test` | off | skip the final test-set evaluation |
+| `--threshold` | 0.5 | P(stego) ≥ threshold → stego, for all reported metrics |
+| `--no-roc` | off | do not save the ROC curve of the final test |
 | `--workers` | 4 | DataLoader worker processes (use `0` if you hit problems on Windows) |
 | `--device` | auto | `auto`, `cpu`, `cuda`, `cuda:1`, `mps` |
 | `--seed` | none | random seed for reproducibility |
@@ -140,7 +142,9 @@ Everything for one run is written to `outputs/<run-name>/`:
 | `last.pt` | checkpoint after the latest epoch – use it with `--resume` |
 | `train.log` | full training log |
 | `config.json` | all arguments of the run |
-| `test_metrics.json` | final test accuracy, P_E, per-class accuracy |
+| `test_metrics.json` | full metric report on the test set (see [Metrics](#metrics)) |
+| `test_roc.png` | ROC curve of the test set |
+| `test_roc_points.csv` | the ROC points (threshold, FPR, TPR) for plotting elsewhere |
 
 ---
 
@@ -155,17 +159,40 @@ python src/test.py --weights outputs/suniward_0.4/best.pt                  # use
 python src/test.py --weights outputs/suniward_0.4/best.pt --input data/val -o val_results.csv
 ```
 
-Output:
+Save the report and the ROC curve as files as well:
+
+```bash
+python src/test.py --weights outputs/suniward_0.4/best.pt --input data/test \
+                   -o predictions.csv -m metrics.json --roc roc.png
+```
+
+`-o` writes one row per image, `-m` the metric report as JSON, `--roc` the curve as an image
+(plus `roc.csv` with the raw points next to it). The console report looks like this:
 
 ```
-Labelled images : 10000
-Accuracy        : ...
-Cover accuracy  : ...   (P_FA = false-alarm rate)
-Stego accuracy  : ...   (P_MD = missed-detection rate)
-P_E             : ...   (0.5 * (P_FA + P_MD), the usual steganalysis error)
-ROC AUC         : ...
-Confusion matrix (rows = true, cols = predicted)
+--------------------------------------------------------------
+Labelled images - best.pt  (10000 images: 5000 cover, 5000 stego)
+--------------------------------------------------------------
+Confusion matrix (rows = true, cols = predicted):
+                 cover     stego
+   cover        4402       598   (TN, FP)
+   stego         731      4269   (FN, TP)
+
+  Accuracy                  : 0.8671
+  Balanced accuracy         : 0.8671
+  Precision                 : 0.8772
+  Recall / TPR              : 0.8538
+  F1-score                  : 0.8653
+  Specificity / TNR         : 0.8804
+  False-alarm rate (FPR)    : 0.1196
+  Missed-detection rate(FNR): 0.1462
+  P_E = (FPR + FNR) / 2     : 0.1329
+  ROC AUC                   : 0.9387
+  Decision threshold        : 0.50
+--------------------------------------------------------------
 ```
+
+(The numbers above are only an illustration of the format.)
 
 **2. Arbitrary images** – single files and/or folders, no labels needed:
 
@@ -193,10 +220,81 @@ Handling of image sizes in `test.py`:
 Images are **never resized** – interpolation would erase the stego signal.
 
 Other options: `--threshold` (P(stego) decision threshold, default 0.5), `--batch-size` (tiles per
-forward pass), `--output/-o` (CSV with every prediction), `--verbose/-v` (list every image in labelled
-mode), `--device`.
+forward pass), `--output/-o` (CSV with every prediction), `--metrics/-m` (JSON report), `--roc`
+(ROC curve image), `--verbose/-v` (list every image in labelled mode), `--device`.
 
 `test.py` also accepts checkpoints produced by the original `CTNet.py`.
+
+---
+
+## Metrics
+
+Both `train.py` (final test) and `test.py` (`--metrics`) write the same JSON report. Positive class =
+**stego**, negative class = **cover**.
+
+```json
+{
+  "checkpoint": "outputs/suniward_0.4/best.pt",
+  "split": "data/test",
+  "images": 10000,
+  "cover_images": 5000,
+  "stego_images": 5000,
+  "threshold": 0.5,
+  "TP": 4269, "TN": 4402, "FP": 598, "FN": 731,
+  "accuracy": 0.8671,
+  "balanced_accuracy": 0.8671,
+  "precision": 0.8772,
+  "recall_TPR": 0.8538,
+  "f1_score": 0.8653,
+  "specificity_TNR": 0.8804,
+  "false_alarm_rate_FPR": 0.1196,
+  "missed_detection_rate_FNR": 0.1462,
+  "P_E": 0.1329,
+  "AUC": 0.9387,
+  "loss": 0.3187,
+  "cover_accuracy": 0.8804,
+  "stego_accuracy": 0.8538
+}
+```
+
+| Field | Definition | Meaning here |
+|---|---|---|
+| `TP` | stego predicted stego | hidden message correctly found |
+| `TN` | cover predicted cover | clean image correctly cleared |
+| `FP` | cover predicted stego | false accusation |
+| `FN` | stego predicted cover | hidden message missed |
+| `accuracy` | (TP+TN)/N | fraction correct; only meaningful when the classes are balanced |
+| `balanced_accuracy` | (TPR+TNR)/2 | accuracy corrected for unbalanced classes; equals `1 - P_E` |
+| `precision` | TP/(TP+FP) | of the images flagged as stego, how many really are |
+| `recall_TPR` | TP/(TP+FN) | of the stego images, how many were found (detection rate) |
+| `f1_score` | 2·P·R/(P+R) | harmonic mean of precision and recall |
+| `specificity_TNR` | TN/(TN+FP) | of the cover images, how many were cleared |
+| `false_alarm_rate_FPR` | FP/(TN+FP) | cover images wrongly flagged = `1 - specificity` |
+| `missed_detection_rate_FNR` | FN/(TP+FN) | stego images missed = `1 - recall` |
+| `P_E` | (FPR+FNR)/2 | the standard steganalysis error; 0.5 = useless, 0 = perfect |
+| `AUC` | area under the ROC curve | threshold-independent ranking quality |
+| `loss` | cross-entropy | only in the report written by `train.py` |
+
+`cover_accuracy` / `stego_accuracy` are duplicates of `specificity_TNR` / `recall_TPR`, kept because those
+names are common in the steganalysis literature. Rates that are undefined (e.g. `precision` when nothing
+was flagged, or anything needing a class that is absent) are written as `null`.
+
+Everything except `AUC` depends on `--threshold`; only the counts and rates change with it, `AUC` does not.
+Raise the threshold if false alarms are more costly than misses, and lower it in the opposite case.
+
+### ROC curve
+
+The ROC curve plots the detection rate (TPR) against the false-alarm rate (FPR) for **every** possible
+threshold, so it shows the whole trade-off instead of a single operating point. The diagonal is random
+guessing; the further the curve bulges toward the top-left corner, the better the detector. The marked
+point is the best trade-off in the Youden sense (largest TPR − FPR), which is a reasonable default
+threshold when false alarms and misses are equally bad.
+
+`train.py` writes `test_roc.png` + `test_roc_points.csv` at the end of training (disable with `--no-roc`);
+`test.py` writes them with `--roc <file>`. The image format follows the extension (`.png`, `.pdf`, `.svg`).
+The CSV holds every (threshold, FPR, TPR) triple, so the curve can be re-plotted or compared with other
+detectors in Excel, gnuplot or matplotlib. A ROC needs both classes, so it is only produced for labelled
+input. If matplotlib is not installed, only the CSV is written and a warning is shown.
 
 ---
 
@@ -245,8 +343,10 @@ mode), `--device`.
     and `--best-after` is automatically lowered when it is ≥ `--epochs`;
   * checkpoints are written atomically, so an interrupted save cannot corrupt them;
   * images are read via `cv2.imdecode`, so paths with non-ASCII characters work on Windows.
-* **Extra metrics** – validation/test report loss, per-class accuracy and P_E; `test.py` adds ROC AUC,
-  confusion matrix and CSV export.
+* **Extra metrics** – the original only printed accuracy. Both scripts now report the confusion matrix
+  (TP/TN/FP/FN), accuracy, balanced accuracy, precision, recall/TPR, F1, specificity, false-alarm rate,
+  missed-detection rate, P_E and ROC AUC, save them as JSON, and plot the ROC curve; `test.py` can also
+  export a per-image CSV.
 
 ### Original behaviour kept on purpose
 
@@ -292,6 +392,7 @@ These are properties of the published model; they were preserved so that results
 | `CUDA out of memory` | Lower `--batch-size` (e.g. 8 or 4). |
 | DataLoader hangs / errors on Windows | Run with `--workers 0`. |
 | `torch.cuda.is_available()` is `False` | The CPU build of PyTorch is installed – reinstall PyTorch with the CUDA command from pytorch.org. |
+| No ROC image, only the `.csv` | matplotlib is missing: `pip install matplotlib`. |
 | Validation accuracy stays at 0.5 | Normal during the first epochs; if it persists, check that stego images really differ from their covers and are stored losslessly. Lower payloads take much longer to learn (curriculum training from a higher payload helps). |
 
 ---

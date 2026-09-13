@@ -25,6 +25,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -32,9 +33,10 @@ from torch.utils.data import DataLoader
 
 from ctnet import build_model
 from datasets import CoverStegoPairDataset, DatasetError, eval_transform, find_pairs, train_transform
-from utils import (DEFAULT_DATA_DIR, DEFAULT_OUTPUT_DIR, AverageMeter, count_parameters,
-                   flatten_pair_batch, get_device, load_checkpoint, lr_at_epoch,
-                   save_checkpoint, set_logger, set_lr, set_seed)
+from utils import (DEFAULT_DATA_DIR, DEFAULT_OUTPUT_DIR, AverageMeter, compute_metrics,
+                   count_parameters, flatten_pair_batch, fmt, get_device, load_checkpoint,
+                   log_metrics, lr_at_epoch, plot_roc, save_checkpoint, save_metrics,
+                   save_roc_points, set_logger, set_lr, set_seed)
 
 
 # --------------------------------------------------------------------------- #
@@ -80,41 +82,36 @@ def adjust_bn_stats(model, device, loader):
 
 
 @torch.no_grad()
-def evaluate(model, device, loader, criterion):
-    """Returns dict with accuracy, loss and per-class accuracies on a paired loader."""
+def evaluate(model, device, loader, criterion, threshold=0.5):
+    """Run the model over a paired loader.
+
+    Returns (metrics, labels, scores) where scores are the P(stego) of every
+    image, so the caller can also plot a ROC curve.
+    """
     model.eval()
-    loss_sum, correct, total = 0.0, 0, 0
-    correct_cls, total_cls = [0, 0], [0, 0]
+    loss_sum, n = 0.0, 0
+    all_labels, all_scores = [], []
 
     for sample in loader:
         data, label = flatten_pair_batch(sample, device)
         output = model(data)
         loss_sum += criterion(output, label).item() * data.size(0)
-        pred = output.argmax(1)
-        correct += (pred == label).sum().item()
-        total += label.numel()
-        for c in (0, 1):
-            m = label == c
-            correct_cls[c] += (pred[m] == c).sum().item()
-            total_cls[c] += m.sum().item()
+        n += data.size(0)
+        all_labels.append(label.cpu().numpy())
+        all_scores.append(torch.softmax(output, dim=1)[:, 1].cpu().numpy())
 
-    cover_acc = correct_cls[0] / max(total_cls[0], 1)
-    stego_acc = correct_cls[1] / max(total_cls[1], 1)
-    return {
-        "accuracy": correct / max(total, 1),
-        "loss": loss_sum / max(total, 1),
-        "cover_accuracy": cover_acc,             # 1 - false-alarm rate
-        "stego_accuracy": stego_acc,             # 1 - missed-detection rate
-        "P_E": 0.5 * ((1 - cover_acc) + (1 - stego_acc)),
-        "images": total,
-    }
+    labels = np.concatenate(all_labels) if all_labels else np.array([])
+    scores = np.concatenate(all_scores) if all_scores else np.array([])
+    metrics = compute_metrics(labels, scores, threshold, loss=loss_sum / max(n, 1))
+    return metrics, labels, scores
 
 
-def log_metrics(name, m):
+def log_val_summary(epoch, m):
+    """One compact line per validation (the full report is printed for the test set)."""
     logging.info("-" * 8)
-    logging.info(f"{name}: acc {m['accuracy']:.4f} | loss {m['loss']:.4f} | "
-                 f"cover acc {m['cover_accuracy']:.4f} | stego acc {m['stego_accuracy']:.4f} | "
-                 f"P_E {m['P_E']:.4f} | {m['images']} images")
+    logging.info(f"Val (epoch {epoch}): acc {fmt(m['accuracy'])} | loss {fmt(m['loss'])} | "
+                 f"bal acc {fmt(m['balanced_accuracy'])} | F1 {fmt(m['f1_score'])} | "
+                 f"P_E {fmt(m['P_E'])} | AUC {fmt(m['AUC'])} | {m['images']} images")
 
 
 # --------------------------------------------------------------------------- #
@@ -205,8 +202,8 @@ def main(args):
         if epoch % args.eval_every == 0 or epoch == args.epochs:
             if not args.no_bn_adjust:
                 adjust_bn_stats(model, device, train_loader)
-            m = evaluate(model, device, val_loader, criterion)
-            log_metrics(f"Val (epoch {epoch})", m)
+            m, _, _ = evaluate(model, device, val_loader, criterion, args.threshold)
+            log_val_summary(epoch, m)
 
             if m["accuracy"] > best_acc and epoch > args.best_after:
                 best_acc = m["accuracy"]
@@ -233,10 +230,18 @@ def main(args):
 
     test_set = CoverStegoPairDataset(test_dir, eval_transform())
     test_loader = make_loader(test_set, args.batch_size, False, args.workers, device)
-    m = evaluate(model, device, test_loader, criterion)
-    log_metrics("Test", m)
-    with open(out_dir / "test_metrics.json", "w", encoding="utf-8") as f:
-        json.dump({"checkpoint": str(ckpt_path), **m}, f, indent=2)
+    m, labels, scores = evaluate(model, device, test_loader, criterion, args.threshold)
+    log_metrics(m, f"Test set - {ckpt_path.name}")
+
+    save_metrics(out_dir / "test_metrics.json", m,
+                 checkpoint=str(ckpt_path), split=str(test_dir))
+    logging.info(f"Metrics written to {out_dir / 'test_metrics.json'}")
+    if not args.no_roc:
+        roc_png = plot_roc(labels, scores, out_dir / "test_roc.png",
+                           title=f"ROC - CTNet test set ({out_dir.name})", auc=m["AUC"])
+        save_roc_points(out_dir / "test_roc_points.csv", labels, scores)
+        if roc_png:
+            logging.info(f"ROC curve written to {roc_png}")
 
 
 def parse_args(argv=None):
@@ -266,6 +271,10 @@ def parse_args(argv=None):
     g.add_argument("--no-bn-adjust", action="store_true",
                    help="skip BN-statistics refresh over the train set before evaluation (faster)")
     g.add_argument("--no-test", action="store_true", help="skip final evaluation on the test split")
+    g.add_argument("--threshold", type=float, default=0.5,
+                   help="P(stego) >= threshold -> stego (used for all reported metrics)")
+    g.add_argument("--no-roc", action="store_true",
+                   help="do not save test_roc.png / test_roc_points.csv")
     g.add_argument("--print-freq", type=int, default=100)
     g.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     g.add_argument("--run-name", default=None, help="sub-folder of --output-dir (default: timestamp)")
