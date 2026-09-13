@@ -1,0 +1,13 @@
+# CTNet steganalysis - Python dependencies
+# Install:  pip install -r requirements.txt
+#
+# GPU users: install the CUDA build of PyTorch FIRST, matching your driver,
+# using the command from https://pytorch.org/get-started/locally/
+# e.g.  pip install torch --index-url https://download.pytorch.org/whl/cu124
+# and then run `pip install -r requirements.txt` (torch will be kept).
+
+torch>=2.0
+numpy>=1.23
+opencv-python>=4.5     # image I/O + Gabor kernels (opencv-python-headless also works)
+einops>=0.6            # tensor rearrange in the Transformer
+tqdm>=4.60             # progress bar in test.py

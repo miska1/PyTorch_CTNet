@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Training outputs / checkpoints
+outputs/
+*.pt
+*.pth
+
+# Datasets (keep only the folder skeleton)
+data/**/*
+!data/**/
+!data/**/.gitkeep
+
+# Misc
+*.csv
+.ipynb_checkpoints/
+.DS_Store
+.idea/
+.vscode/
