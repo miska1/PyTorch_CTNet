@@ -297,7 +297,8 @@ def plot_roc(labels, scores, path, title="ROC curve", auc=None):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(5.5, 5.5), dpi=150)
-    ax.plot(fpr, tpr, lw=2, label=f"CTNet (AUC = {auc:.4f})")
+
+    ax.plot(fpr, tpr, lw=2, color="#1f77b4", label=f"CTNet (AUC = {auc:.4f})")
     ax.plot([0, 1], [0, 1], "k--", lw=1, label="random guess (AUC = 0.5)")
     ax.plot(fpr[j], tpr[j], "o", ms=6, color="crimson",
             label=f"best trade-off @ {thr[j]:.3f}\n(FPR {fpr[j]:.3f}, TPR {tpr[j]:.3f})")

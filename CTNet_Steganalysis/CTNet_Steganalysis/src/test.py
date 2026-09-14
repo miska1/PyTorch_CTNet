@@ -2,16 +2,26 @@
 """
 Test a trained CTNet on images.
 
-Labelled evaluation (folder with cover/ and stego/ sub-folders):
-    python src/test.py --weights outputs/run/best.pt                      # default: data/test
-    python src/test.py --weights outputs/run/best.pt --input data/val
+Folders are searched recursively and every image is labelled by the nearest
+'cover' or 'stego' folder above it, so a whole dataset tree can be tested at
+once. All images found are reported together as one result, regardless of the
+sub-folder they came from:
 
-Prediction on arbitrary images / folders (no labels needed):
+    python src/test.py --weights outputs/run/best.pt --input data
+        -> one report over data/{train,val,test}/{cover,stego}
+
+    python src/test.py --weights outputs/run/best.pt                  # data/test only
+    python src/test.py --weights outputs/run/best.pt --input data/val data/test
+
+Prediction on images without labels (nothing called cover/ or stego/ above them):
+
     python src/test.py --weights outputs/run/best.pt --input photo.png some_folder/
     python src/test.py --weights outputs/run/best.pt --input big_images/ --tile-mode center
 
-Save every prediction to CSV:
-    python src/test.py --weights outputs/run/best.pt --input data/test --output results.csv
+Save the predictions, the metric report and the ROC curve:
+
+    python src/test.py --weights outputs/run/best.pt --input data \
+                       -o predictions.csv -m metrics.json --roc roc.png
 
 Images larger than 256x256 are split into non-overlapping 256x256 tiles
 (or centre-cropped with --tile-mode center) and the per-tile stego
@@ -30,10 +40,9 @@ import torch
 from torch.utils.data import DataLoader
 
 from ctnet import CLASS_NAMES, IMAGE_SIZE, CTNet
-from datasets import (COVER_DIR, STEGO_DIR, InferenceImageDataset, collect_labeled_images,
-                      inference_collate, is_labeled_dir, list_images)
-from utils import (DEFAULT_DATA_DIR, compute_metrics, get_device, load_checkpoint, log_metrics,
-                   plot_roc, save_metrics, save_roc_points, set_logger)
+from datasets import InferenceImageDataset, inference_collate, label_from_path, list_images
+from utils import (DEFAULT_DATA_DIR, compute_metrics, fmt, get_device, load_checkpoint,
+                   log_metrics, plot_roc, save_metrics, save_roc_points, set_logger)
 
 try:
     from tqdm import tqdm
@@ -46,35 +55,33 @@ except ImportError:                      # tqdm is optional
 #  Input collection                                                            #
 # --------------------------------------------------------------------------- #
 def collect_inputs(inputs):
-    """Returns list of (path, label or None).
+    """Collect every image below the given files/folders.
 
-    * a folder with cover/ and stego/ sub-folders -> labelled (0 / 1)
-    * a folder named 'cover' or 'stego'           -> labelled by its name
-    * a file whose parent folder is 'cover'/'stego' -> labelled by that name
-    * any other folder / file                     -> unlabelled
+    Folders are searched recursively, so a whole dataset tree can be passed at
+    once (``--input data`` finds data/train/cover, data/train/stego,
+    data/val/..., data/test/... and any other sub-folder).
+
+    Every image gets a label from the nearest 'cover' (0) or 'stego' (1) folder
+    above it, or None when there is none. All labelled images are reported
+    together, no matter which sub-folder they came from.
     """
-    def label_from_name(name):
-        name = name.lower()
-        return 0 if name == COVER_DIR else 1 if name == STEGO_DIR else None
-
     items, seen = [], set()
     for inp in inputs:
         p = Path(inp)
         if p.is_file():
-            new = [(p, label_from_name(p.parent.name))]
-        elif is_labeled_dir(p):
-            new = collect_labeled_images(p)
+            found = [p]
         elif p.is_dir():
-            label = label_from_name(p.name)
-            new = [(f, label) for f in list_images(p)]
+            found = list_images(p)                    # recursive
+            if not found:
+                logging.warning(f"No images found in: {p}")
         else:
             logging.warning(f"Input not found: {p}")
             continue
-        for path, label in new:
+        for path in found:
             key = path.resolve()
             if key not in seen:
                 seen.add(key)
-                items.append((path, label))
+                items.append({"path": path, "label": label_from_path(path)})
     return items
 
 
@@ -142,13 +149,13 @@ def main(args):
     logging.info(f"Loaded {args.weights} (epoch {ckpt.get('epoch', '?')}) on {device}")
     logging.info(f"{len(items)} image(s); tile mode: {args.tile_mode}; aggregation: {args.aggregate}")
 
-    paths = [p for p, _ in items]
-    results = predict(model, device, paths, args.batch_size, args.tile_mode, args.aggregate, args.workers)
+    results = predict(model, device, [it["path"] for it in items],
+                      args.batch_size, args.tile_mode, args.aggregate, args.workers)
 
     rows = []
-    for (path, label), r in zip(items, results):
+    for it, r in zip(items, results):
         pred = None if r["p_stego"] is None else int(r["p_stego"] >= args.threshold)
-        rows.append({"path": str(path), "label": label, "pred": pred, **r})
+        rows.append({**it, "path": str(it["path"]), "pred": pred, **r})
 
     ok = [r for r in rows if r["pred"] is not None]
     failed = [r for r in rows if r["pred"] is None]
@@ -169,48 +176,58 @@ def main(args):
     for r in failed:
         logging.warning(f"SKIPPED {r['path']}: {r['error']}")
 
-    # ---- summary -------------------------------------------------------------
+    # ---- summary -----------------------------------------------------------
     n_stego = sum(r["pred"] for r in ok)
     logging.info("")
     logging.info(f"Predicted: {len(ok) - n_stego} cover, {n_stego} stego  "
                  f"(threshold {args.threshold}, {len(failed)} skipped)")
 
-    if labeled:
-        labels = [r["label"] for r in labeled]
-        scores = [r["p_stego"] for r in labeled]
-        m = compute_metrics(labels, scores, args.threshold)
-        logging.info("")
-        log_metrics(m, f"Labelled images - {Path(args.weights).name}")
+    if not labeled:
+        if args.metrics or args.roc:
+            logging.warning("No labelled images (none of them is inside a 'cover' or 'stego' "
+                            "folder) - metrics file and ROC curve skipped.")
+        write_predictions_csv(args.output, rows)
+        return
 
-        if args.metrics:
-            save_metrics(args.metrics, m, checkpoint=str(args.weights),
-                         input=[str(i) for i in args.input],
-                         tile_mode=args.tile_mode, aggregate=args.aggregate)
-            logging.info(f"Metrics written to {args.metrics}")
-        if args.roc:
-            png = plot_roc(labels, scores, args.roc,
-                           title=f"ROC - CTNet ({Path(args.weights).stem})", auc=m["AUC"])
-            save_roc_points(Path(args.roc).with_suffix(".csv"), labels, scores)
-            if png:
-                logging.info(f"ROC curve written to {png} "
-                             f"(points: {Path(args.roc).with_suffix('.csv')})")
-    elif args.metrics or args.roc:
-        logging.warning("No labelled images (need cover/ and stego/ folders) - "
-                        "metrics file and ROC curve skipped.")
+    labels = [r["label"] for r in labeled]
+    scores = [r["p_stego"] for r in labeled]
+    overall = compute_metrics(labels, scores, args.threshold)
 
-    if args.output:
-        out = Path(args.output)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        with open(out, "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            w.writerow(["path", "true_label", "prediction", "p_stego", "n_tiles", "error"])
-            for r in rows:
-                w.writerow([r["path"],
-                            "" if r["label"] is None else CLASS_NAMES[r["label"]],
-                            "" if r["pred"] is None else CLASS_NAMES[r["pred"]],
-                            "" if r["p_stego"] is None else f"{r['p_stego']:.6f}",
-                            r["n_tiles"], r["error"]])
-        logging.info(f"Results written to {out}")
+    logging.info("")
+    log_metrics(overall, f"All labelled images - {Path(args.weights).name}")
+
+    # ---- files -------------------------------------------------------------
+    if args.metrics:
+        save_metrics(args.metrics, overall, checkpoint=str(args.weights),
+                     input=[str(i) for i in args.input],
+                     tile_mode=args.tile_mode, aggregate=args.aggregate)
+        logging.info(f"Metrics written to {args.metrics}")
+
+    if args.roc:
+        png = plot_roc(labels, scores, args.roc, auc=overall["AUC"],
+                       title=f"ROC - CTNet ({Path(args.weights).stem})")
+        points = save_roc_points(Path(args.roc).with_suffix(".csv"), labels, scores)
+        if png:
+            logging.info(f"ROC curve written to {png} (points: {points})")
+
+    write_predictions_csv(args.output, rows)
+
+
+def write_predictions_csv(path, rows):
+    if not path:
+        return
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["path", "true_label", "prediction", "p_stego", "n_tiles", "error"])
+        for r in rows:
+            w.writerow([r["path"],
+                        "" if r["label"] is None else CLASS_NAMES[r["label"]],
+                        "" if r["pred"] is None else CLASS_NAMES[r["pred"]],
+                        "" if r["p_stego"] is None else f"{r['p_stego']:.6f}",
+                        r["n_tiles"], r["error"]])
+    logging.info(f"Results written to {out}")
 
 
 def parse_args(argv=None):
@@ -218,7 +235,8 @@ def parse_args(argv=None):
                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument("--weights", "-w", required=True, help="checkpoint (.pt) from train.py or original CTNet.py")
     p.add_argument("--input", "-i", nargs="+", default=[str(DEFAULT_DATA_DIR / "test")],
-                   help="image file(s) and/or folder(s)")
+                   help="image file(s) and/or folder(s); folders are searched recursively, "
+                        "so a whole dataset tree such as 'data' can be given at once")
     p.add_argument("--tile-mode", choices=["tile", "center"], default="tile",
                    help="how to handle images larger than 256x256")
     p.add_argument("--aggregate", choices=["mean", "max"], default="mean",

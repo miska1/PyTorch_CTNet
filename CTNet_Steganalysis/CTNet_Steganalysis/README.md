@@ -150,28 +150,41 @@ Everything for one run is written to `outputs/<run-name>/`:
 
 ## Testing
 
-`src/test.py` loads a checkpoint and evaluates it. Two use cases:
+`src/test.py` loads a checkpoint and evaluates it.
 
-**1. Labelled evaluation** – any folder with `cover/` and `stego/` sub-folders (pairing is not required):
+**Folders are searched recursively**, and every image is labelled by the nearest folder called `cover`
+(0) or `stego` (1) *above* it. So you can point the script at a single folder, at several folders, or at
+the whole dataset tree – no pairing and no fixed depth required:
 
 ```bash
-python src/test.py --weights outputs/suniward_0.4/best.pt                  # uses data/test
-python src/test.py --weights outputs/suniward_0.4/best.pt --input data/val -o val_results.csv
+python src/test.py --weights outputs/suniward_0.4/best.pt                     # data/test (default)
+python src/test.py --weights outputs/suniward_0.4/best.pt --input data        # the whole tree
+python src/test.py --weights outputs/suniward_0.4/best.pt --input data/val data/test
+python src/test.py --weights outputs/suniward_0.4/best.pt --input data/test/cover
 ```
 
-Save the report and the ROC curve as files as well:
+With `--input data` all six folders (`data/{train,val,test}/{cover,stego}`) are evaluated in one run and
+reported **together as a single result** – one confusion matrix, one set of metrics, one ROC curve over
+every image found. Sub-folders inside `cover/` or `stego/` are fine, the label comes from the nearest
+matching ancestor. Images with no `cover`/`stego` folder above them are still predicted, just not scored,
+and duplicate paths are only evaluated once.
+
+If you ever do need a breakdown, run the script once per folder, or export the per-image CSV with `-o`
+and group it yourself.
+
+Save the predictions, the report and the ROC curve as files:
 
 ```bash
-python src/test.py --weights outputs/suniward_0.4/best.pt --input data/test \
+python src/test.py --weights outputs/suniward_0.4/best.pt --input data \
                    -o predictions.csv -m metrics.json --roc roc.png
 ```
 
-`-o` writes one row per image, `-m` the metric report as JSON, `--roc` the curve as an image
-(plus `roc.csv` with the raw points next to it). The console report looks like this:
+`-o` writes one row per image, `-m` the metric report as JSON, `--roc` the curve as an image (plus
+`roc.csv` with the raw points next to it). The console report over all labelled images looks like this:
 
 ```
 --------------------------------------------------------------
-Labelled images - best.pt  (10000 images: 5000 cover, 5000 stego)
+All labelled images - best.pt  (10000 images: 5000 cover, 5000 stego)
 --------------------------------------------------------------
 Confusion matrix (rows = true, cols = predicted):
                  cover     stego
@@ -194,7 +207,7 @@ Confusion matrix (rows = true, cols = predicted):
 
 (The numbers above are only an illustration of the format.)
 
-**2. Arbitrary images** – single files and/or folders, no labels needed:
+Images without labels are simply listed with their prediction:
 
 ```bash
 python src/test.py --weights outputs/suniward_0.4/best.pt --input photo.png folder_with_images/
@@ -205,9 +218,6 @@ prediction  P(stego) tiles  true   file
 cover         0.0312     1         folder_with_images/a.png
 stego         0.9741     6         photo.png
 ```
-
-Labels are inferred automatically when a folder (or a file's parent folder) is named `cover` or `stego`,
-so `--input data/test/stego` also reports metrics.
 
 Handling of image sizes in `test.py`:
 
@@ -220,8 +230,9 @@ Handling of image sizes in `test.py`:
 Images are **never resized** – interpolation would erase the stego signal.
 
 Other options: `--threshold` (P(stego) decision threshold, default 0.5), `--batch-size` (tiles per
-forward pass), `--output/-o` (CSV with every prediction), `--metrics/-m` (JSON report), `--roc`
-(ROC curve image), `--verbose/-v` (list every image in labelled mode), `--device`.
+forward pass – lower it if you run out of memory), `--output/-o` (CSV with every prediction),
+`--metrics/-m` (JSON report), `--roc` (ROC curve image), `--verbose/-v` (list every image, also the
+labelled ones), `--device`.
 
 `test.py` also accepts checkpoints produced by the original `CTNet.py`.
 
@@ -343,6 +354,9 @@ input. If matplotlib is not installed, only the CSV is written and a warning is 
     and `--best-after` is automatically lowered when it is ≥ `--epochs`;
   * checkpoints are written atomically, so an interrupted save cannot corrupt them;
   * images are read via `cv2.imdecode`, so paths with non-ASCII characters work on Windows.
+* **Flexible test input** – `test.py` takes any mix of files and folders, searches folders recursively and
+  labels each image by the nearest `cover`/`stego` folder above it, so the whole `data` tree can be
+  evaluated in one combined run. The original had no inference script at all.
 * **Extra metrics** – the original only printed accuracy. Both scripts now report the confusion matrix
   (TP/TN/FP/FN), accuracy, balanced accuracy, precision, recall/TPR, F1, specificity, false-alarm rate,
   missed-detection rate, P_E and ROC AUC, save them as JSON, and plot the ROC curve; `test.py` can also

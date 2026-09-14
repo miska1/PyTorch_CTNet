@@ -104,17 +104,22 @@ def find_pairs(split_dir):
     return [(covers[k], stegos[k]) for k in common]
 
 
-def collect_labeled_images(root):
-    """All images under root/cover (label 0) and root/stego (label 1). Pairing NOT required."""
-    root = Path(root)
-    items = [(p, 0) for p in list_images(root / COVER_DIR)]
-    items += [(p, 1) for p in list_images(root / STEGO_DIR)]
-    return items
+def label_from_path(path):
+    """Label an image by the nearest folder called 'cover' (0) or 'stego' (1)
+    anywhere above it; None if there is no such folder.
 
-
-def is_labeled_dir(path):
-    path = Path(path)
-    return path.is_dir() and (path / COVER_DIR).is_dir() and (path / STEGO_DIR).is_dir()
+        data/test/cover/a.png            -> 0
+        data/train/stego/sub/b.png       -> 1
+        photos/holiday.png               -> None
+    """
+    p = Path(path).resolve()
+    for parent in p.parents:
+        name = parent.name.lower()
+        if name == COVER_DIR:
+            return 0
+        if name == STEGO_DIR:
+            return 1
+    return None
 
 
 # --------------------------------------------------------------------------- #
