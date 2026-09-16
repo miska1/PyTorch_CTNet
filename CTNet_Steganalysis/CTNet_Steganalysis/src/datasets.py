@@ -78,10 +78,14 @@ def _key(path, root):
 def find_pairs(split_dir):
     """Match cover/stego files of one split. Returns list of (cover_path, stego_path)."""
     split_dir = Path(split_dir)
+    if not split_dir.is_dir():
+        raise DatasetError(f"Folder not found: {split_dir}")
     cover_root, stego_root = split_dir / COVER_DIR, split_dir / STEGO_DIR
-    for d in (cover_root, stego_root):
-        if not d.is_dir():
-            raise DatasetError(f"Missing directory: {d}  (expected {split_dir}/cover and {split_dir}/stego)")
+    missing = [d.name for d in (cover_root, stego_root) if not d.is_dir()]
+    if missing:
+        have = sorted(p.name for p in split_dir.iterdir() if p.is_dir())
+        raise DatasetError(f"{split_dir} has no {' and no '.join(missing)} sub-folder "
+                           f"(sub-folders found: {', '.join(have) if have else 'none'})")
 
     covers = {_key(p, cover_root): p for p in list_images(cover_root)}
     stegos = {_key(p, stego_root): p for p in list_images(stego_root)}

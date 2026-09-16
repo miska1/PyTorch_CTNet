@@ -331,6 +331,32 @@ def save_roc_points(path, labels, scores):
     return path
 
 
+def format_duration(seconds):
+    """Human-readable duration: '1d 03h 12m', '2h 05m 31s', '47.3s'."""
+    if seconds is None:
+        return "n/a"
+    seconds = max(float(seconds), 0.0)
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    m, s = divmod(int(round(seconds)), 60)
+    h, m = divmod(m, 60)
+    d, h = divmod(h, 24)
+    if d:
+        return f"{d}d {h:02d}h {m:02d}m"
+    if h:
+        return f"{h}h {m:02d}m {s:02d}s"
+    return f"{m}m {s:02d}s"
+
+
+def sync(device):
+    """Wait for queued GPU work so the measured times are real, not just
+    the time it took to enqueue the kernels. No-op on CPU."""
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    elif device.type == "mps" and hasattr(torch, "mps"):
+        torch.mps.synchronize()
+
+
 def count_parameters(model, trainable_only=True):
     return sum(p.numel() for p in model.parameters() if p.requires_grad or not trainable_only)
 

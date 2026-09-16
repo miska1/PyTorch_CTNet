@@ -33,6 +33,7 @@ import argparse
 import csv
 import logging
 import os
+import time
 from pathlib import Path
 
 import numpy as np
@@ -41,7 +42,7 @@ from torch.utils.data import DataLoader
 
 from ctnet import CLASS_NAMES, IMAGE_SIZE, CTNet
 from datasets import InferenceImageDataset, inference_collate, label_from_path, list_images
-from utils import (DEFAULT_DATA_DIR, compute_metrics, fmt, get_device, load_checkpoint,
+from utils import (DEFAULT_DATA_DIR, compute_metrics, format_duration, get_device, load_checkpoint,
                    log_metrics, plot_roc, save_metrics, save_roc_points, set_logger)
 
 try:
@@ -67,7 +68,7 @@ def collect_inputs(inputs):
     """
     items, seen = [], set()
     for inp in inputs:
-        p = Path(inp)
+        p = Path(inp).expanduser()
         if p.is_file():
             found = [p]
         elif p.is_dir():
@@ -144,13 +145,15 @@ def main(args):
         raise SystemExit(f"No images found in: {', '.join(map(str, args.input))}")
 
     model = CTNet().to(device)
-    ckpt = load_checkpoint(args.weights, model, map_location=device)
+    ckpt = load_checkpoint(Path(args.weights).expanduser(), model, map_location=device)
     model.eval()
     logging.info(f"Loaded {args.weights} (epoch {ckpt.get('epoch', '?')}) on {device}")
     logging.info(f"{len(items)} image(s); tile mode: {args.tile_mode}; aggregation: {args.aggregate}")
 
+    t0 = time.time()
     results = predict(model, device, [it["path"] for it in items],
                       args.batch_size, args.tile_mode, args.aggregate, args.workers)
+    elapsed = time.time() - t0
 
     rows = []
     for it, r in zip(items, results):
@@ -181,6 +184,8 @@ def main(args):
     logging.info("")
     logging.info(f"Predicted: {len(ok) - n_stego} cover, {n_stego} stego  "
                  f"(threshold {args.threshold}, {len(failed)} skipped)")
+    logging.info(f"Took {format_duration(elapsed)} for {len(items)} image(s) "
+                 f"({len(items) / max(elapsed, 1e-9):.1f} img/s)")
 
     if not labeled:
         if args.metrics or args.roc:

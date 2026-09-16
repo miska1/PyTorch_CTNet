@@ -109,16 +109,31 @@ python src/train.py --run-name quick --batch-size 8 --epochs 60 --milestones 30 
 # resume an interrupted run (continues in the same folder)
 python src/train.py --resume outputs/suniward_0.4/last.pt
 
-# data stored elsewhere
+# data stored elsewhere (relative, absolute or ~ paths all work)
 python src/train.py --data-dir D:\datasets\alaska_suniward04
+python src/train.py --data-dir ~/datasets/alaska_suniward04
+python src/train.py --data-dir ../shared/alaska        # relative to where you run the command
+
+# splits in unrelated places
+python src/train.py --train-dir /mnt/fast/train --val-dir /mnt/slow/val --test-dir /mnt/slow/test
+```
+
+The folders actually used are printed as absolute paths at the start of every run, so it is easy to
+confirm that the right data was picked up:
+
+```
+Data directory: /home/user/datasets/alaska_suniward04
+  train: 14000 pairs  <- /home/user/datasets/alaska_suniward04/train
+  val:   1000 pairs  <- /home/user/datasets/alaska_suniward04/val
+  test:  /home/user/datasets/alaska_suniward04/test
 ```
 
 Main options (`python src/train.py -h` lists all):
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--data-dir` | `data` | folder containing `train/`, `val/`, `test/` |
-| `--train-dir / --val-dir / --test-dir` | – | override individual splits |
+| `--data-dir` | `data` | folder containing `train/`, `val/`, `test/`; may be relative, absolute or start with `~` |
+| `--train-dir / --val-dir / --test-dir` | – | override individual splits (any location) |
 | `--epochs` | 200 | number of epochs |
 | `--batch-size` | 16 | cover/stego **pairs** per step → 32 images |
 | `--lr` | 0.01 | initial SGD learning rate (momentum 0.9) |
@@ -133,6 +148,28 @@ Main options (`python src/train.py -h` lists all):
 | `--workers` | 4 | DataLoader worker processes (use `0` if you hit problems on Windows) |
 | `--device` | auto | `auto`, `cpu`, `cuda`, `cuda:1`, `mps` |
 | `--seed` | none | random seed for reproducibility |
+
+While training runs, each epoch prints its progress and then its timing:
+
+```
+===== Epoch 12/200  lr=0.01 =====
+  epoch 12/200  batch 100/875  loss 0.6412 (avg 0.6534)  acc 0.6231  | 41.7 img/s  elapsed 1m 17s  ETA 9m 58s
+  ...
+Val (epoch 12): acc 0.7180 | loss 0.5731 | bal acc 0.7180 | F1 0.7003 | P_E 0.2820 | AUC 0.7902 | 2000 images
+Epoch 12/200 took 15m 41s (train 11m 12s, BN refresh 3m 40s, val 49s; waiting for data 4% of the training part)
+Elapsed 3h 08m 22s | average epoch 15m 42s | 188 epoch(s) left, ETA 2d 01h 12m (2026-09-17 08:41)
+```
+
+and at the end:
+
+```
+Training finished: 200 epoch(s) in 2d 04h 20m (average 15m 41s per epoch, fastest 14m 02s, slowest 18m 10s)
+```
+
+"waiting for data" is the share of the training part spent waiting for the DataLoader instead of
+computing. If it is high (say above 20 %), raise `--workers`; if it is near zero, the GPU is the
+bottleneck. On GPU the timers synchronise first, so they measure finished work, not queued work. The
+elapsed time is stored in the checkpoint, so after `--resume` the total also counts the earlier runs.
 
 Everything for one run is written to `outputs/<run-name>/`:
 
@@ -357,6 +394,9 @@ input. If matplotlib is not installed, only the CSV is written and a warning is 
 * **Flexible test input** – `test.py` takes any mix of files and folders, searches folders recursively and
   labels each image by the nearest `cover`/`stego` folder above it, so the whole `data` tree can be
   evaluated in one combined run. The original had no inference script at all.
+* **Timing** – the original printed a per-batch time that was hard to interpret. Each epoch now reports
+  throughput and ETA while it runs, then its own duration split into training / BN refresh / validation,
+  the elapsed time and the projected finish; the end of the run reports the total and the average epoch.
 * **Extra metrics** – the original only printed accuracy. Both scripts now report the confusion matrix
   (TP/TN/FP/FN), accuracy, balanced accuracy, precision, recall/TPR, F1, specificity, false-alarm rate,
   missed-detection rate, P_E and ROC AUC, save them as JSON, and plot the ROC curve; `test.py` can also
@@ -405,6 +445,7 @@ These are properties of the published model; they were preserved so that results
 | `... size WxH, but CTNet is trained on 256x256 images` | Crop the dataset to 256 × 256 (training/validation only). |
 | `CUDA out of memory` | Lower `--batch-size` (e.g. 8 or 4). |
 | DataLoader hangs / errors on Windows | Run with `--workers 0`. |
+| Training much slower than expected | Check the "waiting for data" share in the epoch line: high means raise `--workers`, near zero means the GPU is the limit. |
 | `torch.cuda.is_available()` is `False` | The CPU build of PyTorch is installed – reinstall PyTorch with the CUDA command from pytorch.org. |
 | No ROC image, only the `.csv` | matplotlib is missing: `pip install matplotlib`. |
 | Validation accuracy stays at 0.5 | Normal during the first epochs; if it persists, check that stego images really differ from their covers and are stored losslessly. Lower payloads take much longer to learn (curriculum training from a higher payload helps). |
